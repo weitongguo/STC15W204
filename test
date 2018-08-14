@@ -1,0 +1,326 @@
+/*---------------------------------------------------------------------*/
+/* --- STC MCU Limited ------------------------------------------------*/
+/* --- STC15F4K60S4 系列 定时器2用作串口1的波特率发生器举例------------*/
+/* --- Mobile: (86)13922805190 ----------------------------------------*/
+/* --- Fax: 86-0513-55012956,55012947,55012969 ------------------------*/
+/* --- Tel: 86-0513-55012928,55012929,55012966-------------------------*/
+/* --- Web: www.STCMCU.com --------------------------------------------*/
+/* --- Web: www.GXWMCU.com --------------------------------------------*/
+/* 如果要在程序中使用此代码,请在程序中注明使用了STC的资料及程序        */
+/* 如果要在文章中应用此代码,请在文章中注明使用了STC的资料及程序        */
+/*---------------------------------------------------------------------*/
+
+//本示例在Keil开发环境下请选择Intel的8058芯片型号进行编译
+//若无特别说明,工作频率一般为11.0592MHz
+//T0做1T定时器，作为第一个触发进来后进行计时
+
+#include "reg51.h"
+#include "intrins.h"
+
+typedef unsigned char BYTE;
+typedef unsigned int WORD;
+
+#define FOSC 12000000L          //系统频率
+#define BAUD 115200             //串口波特率
+
+#define NONE_PARITY     0       //无校验
+#define ODD_PARITY      1       //奇校验
+#define EVEN_PARITY     2       //偶校验
+#define MARK_PARITY     3       //标记校验
+#define SPACE_PARITY    4       //空白校验
+
+#define PARITYBIT EVEN_PARITY   //定义校验位
+
+sfr AUXR  = 0x8e;               //辅助寄存器
+sfr T2H   = 0xd6;               //定时器2高8位
+sfr T2L   = 0xd7;               //定时器2低8位
+sfr INT_CLKO = 0x8f;                //外部中断与时钟输出控制寄存器
+sfr P1M1 = 0x91;
+sfr P1M0 = 0x92;
+sfr P3M1 = 0xb1;
+sfr P3M0 = 0xb2;
+sfr P5   = 0xC8;
+sfr P5M1 = 0xC9;
+sfr P5M0 = 0xCA;
+
+sfr P_SW1   = 0xA2;             //外设功能切换寄存器1
+
+#define S1_S0 0x40              //P_SW1.6
+#define S1_S1 0x80              //P_SW1.7
+//定义四个中断显示LED所在脚位
+sbit LED0 = P1^1; //中断0显示
+sbit LED1 = P1^2; //中断1显示
+sbit LED2 = P1^3; //中断2显示
+sbit LED3 = P1^4; //中断3显示
+sbit RST = P1^0; //复位
+bit busy;
+sbit INT2=P3^6;
+sbit INT3=P3^7;
+BYTE first;
+BYTE times[8];
+WORD timec[4];
+WORD COUNT;
+WORD temp;
+BYTE REC[4];
+/*----------------------------
+UART 中断服务程序
+-----------------------------*/
+void Uart() interrupt 4 using 1
+{
+    if (RI)
+    {
+        RI = 0;                 //清除RI位
+    }
+    if (TI)
+    {
+        TI = 0;                 //清除TI位
+        busy = 0;               //清忙标志
+    }
+}
+
+/*----------------------------
+发送串口数据
+----------------------------*/
+void SendData(BYTE dat)
+{
+    while (busy);               //等待前面的数据发送完成
+    ACC = dat;                  //获取校验位P (PSW.0)
+    if (P)                      //根据P来设置校验位
+    {
+#if (PARITYBIT == ODD_PARITY)
+        TB8 = 0;                //设置校验位为0
+#elif (PARITYBIT == EVEN_PARITY)
+        TB8 = 1;                //设置校验位为1
+#endif
+    }
+    else
+    {
+#if (PARITYBIT == ODD_PARITY)
+        TB8 = 1;                //设置校验位为1
+#elif (PARITYBIT == EVEN_PARITY)
+        TB8 = 0;                //设置校验位为0
+#endif
+    }
+    busy = 1;
+    SBUF = ACC;                 //写数据到UART数据寄存器
+}
+
+/*----------------------------
+发送字符串
+----------------------------*/
+void SendString(char *s)
+{
+    while (*s)                  //检测字符串结束标志
+    {
+        SendData(*s++);         //发送当前字符
+    }
+}
+
+//中断服务程序
+void tm0() interrupt 1 using 1
+{
+	COUNT++;
+}
+
+void exint0() interrupt 0       //INT0中断入口
+{
+    LED0 = 0;                 	//点亮INT0显示LED
+	EX0 = 0;                    //禁止INT0中断
+	if (first==0)//如果是第一个信号
+	{
+	TR0 = 1;		//定时器0开始计时
+	REC[first]=0;
+	first++;
+	}
+	else
+	{
+	REC[first]=0;
+	timec[first]=COUNT;
+	times[first<<1]=TH0;
+	times[(first<<1)+1]=TL0;
+	first++;
+	}
+	
+}
+void exint1() interrupt 2       //INT1中断入口
+{
+    LED1 = 0;                 	//点亮INT1显示LED
+	EX1 =  0;                  //禁止INT1中断
+	if (first==0)//如果是第一个信号
+	{
+	TR0 = 1;		//定时器0开始计时
+	REC[first]=1;
+	first++;
+	}
+	else
+	{
+	REC[first]=1;
+	timec[first]=COUNT;
+	times[first<<1]=TH0;
+	times[(first<<1)+1]=TL0;
+	first++;
+	}
+
+}
+void exint2() interrupt 10      //INT2中断入口
+{
+    LED2 = 0;                 	//点亮INT2显示LED
+	INT_CLKO &= 0xEF;           //禁止INT2中断
+	if (first==0)//如果是第一个信号
+	{
+	TR0 = 1;		//定时器0开始计时
+	REC[first]=2;
+	first++;
+	}
+	else
+	{
+	REC[first]=2;
+	timec[first]=COUNT;
+	times[first<<1]=TH0;
+	times[(first<<1)+1]=TL0;
+	first++;
+	}
+}
+void exint3() interrupt 11      //INT3中断入口
+{
+    LED3 = 0;                 	//点亮INT3显示LED
+	INT_CLKO &= 0xDF;           //禁止INT3中断
+	if (first==0)//如果是第一个信号
+	{
+	TR0 = 1;		//定时器0开始计时
+	REC[first]=3;
+	first++;
+	}
+	else
+	{
+	REC[first]=3;
+	timec[first]=COUNT;
+	times[first<<1]=TH0;
+	times[(first<<1)+1]=TL0;
+	first++;
+	}
+}
+void main()
+{
+    BYTE i;
+	ACC = P_SW1;
+    ACC &= ~(S1_S0 | S1_S1);    //S1_S0=0 S1_S1=0
+    P_SW1 = ACC;                //(P3.0/RxD, P3.1/TxD)
+    
+//  ACC = P_SW1;
+//  ACC &= ~(S1_S0 | S1_S1);    //S1_S0=1 S1_S1=0
+//  ACC |= S1_S0;               //(P3.6/RxD_2, P3.7/TxD_2)
+//  P_SW1 = ACC;  
+//  
+//  ACC = P_SW1;
+//  ACC &= ~(S1_S0 | S1_S1);    //S1_S0=0 S1_S1=1
+//  ACC |= S1_S1;               //(P1.6/RxD_3, P1.7/TxD_3)
+//  P_SW1 = ACC;  
+
+#if (PARITYBIT == NONE_PARITY)
+    SCON = 0x50;                //8位可变波特率
+#elif (PARITYBIT == ODD_PARITY) || (PARITYBIT == EVEN_PARITY) || (PARITYBIT == MARK_PARITY)
+    SCON = 0xda;                //9位可变波特率,校验位初始为1
+#elif (PARITYBIT == SPACE_PARITY)
+    SCON = 0xd2;                //9位可变波特率,校验位初始为0
+#endif
+	
+	INT0 = 1;
+    IT0 = 1;                    //设置INT0的中断类型 (1:仅下降沿 0:上升沿和下降沿)
+    EX0 = 1;                    //使能INT0中断
+    INT1 = 1;
+    IT1 = 1;                    //设置INT1的中断类型 (1:仅下降沿 0:上升沿和下降沿)
+    EX1 = 1;                    //使能INT1中断
+	INT_CLKO |= 0x10;               //(EX2 = 1)使能INT2中断
+	INT_CLKO |= 0x20;               //(EX3 = 1)使能INT3中断
+
+	AUXR &= 0x7F;		//定时器时钟12T模式
+	TMOD &= 0xF0;		//设置定时器模式
+	TL0 = 0xB0;		//设置定时初值
+	TH0 = 0x3C;		//设置定时初值
+	TF0 = 0;		//清除TF0标志
+	TR0 = 1;		//定时器0开始计时
+	ET0 = 1;                        //使能定时器0中断
+
+	T2L = (65536 - (FOSC/4/BAUD));   //设置波特率重装值
+    T2H = (65536 - (FOSC/4/BAUD))>>8;
+    AUXR = 0x14;                //T2为1T模式, 并启动定时器2
+    AUXR |= 0x01;               //选择定时器2为串口1的波特率发生器
+    ES = 1;                     //使能串口1中断
+    EA = 1;
+	SendString("POWER UP!\r\n");
+    
+    while(1)
+	{
+	if (!RST)
+	{
+	SendString("RESET!\r\n");
+	INT0 = 1;
+    IT0 = 1;                    //设置INT0的中断类型 (1:仅下降沿 0:上升沿和下降沿)
+    EX0 = 1;                    //使能INT0中断
+    INT1 = 1;
+    IT1 = 1;                    //设置INT1的中断类型 (1:仅下降沿 0:上升沿和下降沿)
+    EX1 = 1;                    //使能INT1中断
+	INT_CLKO |= 0x10;               //(EX2 = 1)使能INT2中断
+	INT_CLKO |= 0x20;               //(EX3 = 1)使能INT3中断
+	LED0 = 1;
+	LED1 = 1;
+	LED2 = 1;
+	LED3 = 1;
+	COUNT=0;
+	TR0 = 0;		//定时器0停止计时
+	TL0 = 0xB0;		//设置定时初值
+	TH0 = 0x3C;		//设置定时初值
+	TF0 = 0;		//清除TF0标志
+	first=0;
+	for (i=0;i<4;i++)
+	{
+	 timec[i]=0;
+	 times[i<<1]=0x3c;
+	 times[(i<<1)+1]=0xb0;
+	 REC[i]=9;
+	}
+			
+	}
+	if ((LED0==0)&&(INT0==0))
+	{
+	SendString("INT0:");
+
+	}
+		if ((LED1==0)&&(INT1==0))
+	{
+	SendString("INT1\r\n");
+	}
+		if ((LED2==0)&&(INT2==0))
+	{
+	SendString("INT2\r\n");
+	}
+		if ((LED3==0)&&(INT3==0))
+	{
+	SendString("INT3\r\n");
+	}
+for (i=0;i<4;i++)
+{
+	SendString("INT");
+	SendData(REC[i]+'0');
+	SendString(":");
+	SendData(timec[i] / 10000 + '0');           //send to PC from the UART
+    SendData(timec[i] % 10000 / 1000 + '0');
+    SendData(timec[i] % 1000 / 100 + '0');
+    SendData(timec[i]% 100 / 10 + '0');
+    SendData(timec[i] % 10 + '0');
+	SendString(".");
+	temp=((times[i<<1]<<8)+times[(i<<1)+1])-0x3cb0;
+	SendData(temp / 10000 + '0');           //send to PC from the UART
+    SendData(temp % 10000 / 1000 + '0');
+    SendData(temp % 1000 / 100 + '0');
+    SendData(temp% 100 / 10 + '0');
+    SendData(temp % 10 + '0');
+	    SendString(" ; ");
+
+}
+    SendString("\r\n");	
+}	
+}
+
+
